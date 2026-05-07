@@ -5,16 +5,22 @@ logs, top, helm get/list/status/history). The pod's SA gets read-mostly
 RBAC — these wrappers keep the tool surface aligned so the agent can't
 accidentally request something the SA isn't permitted to do.
 
-Two intentional write verbs:
+Intentional write verbs:
   - delete_pod — useful when a controller is wedged but its parent
     StatefulSet/Deployment is fine. Pod deletion is recoverable: the
     parent recreates it.
+  - delete_resource — generic kubectl delete for non-pod kinds (mostly
+    namespace-cleanup territory). NOT recoverable; gated on a
+    confirm_name guard matching the existing Azure-tool cleanup
+    pattern.
   - rollout_restart — patches a workload's pod-template annotation to
     trigger a rolling restart. Same semantics as
     `kubectl rollout restart`.
 
-Both are paired with explicit RBAC additions in
-infra-bootstrap/k8s-mcp-k8s/templates/cluster-reader.yaml.
+The chart's ClusterRoleBinding now grants `*/*` on every verb (see
+the comment in chart/templates/cluster-reader.yaml) so the tool
+allowlist in this file is the only layer scoping what the agent can
+mutate. Add tools deliberately.
 """
 
 from __future__ import annotations
@@ -385,6 +391,48 @@ def register_tools(mcp: FastMCP) -> None:
         the pod. grace_period_seconds=0 forces immediate delete (skips
         terminationGracePeriod)."""
         cmd = ["kubectl", "delete", "pod", name, "-n", namespace]
+        if grace_period_seconds is not None:
+            cmd += [f"--grace-period={int(grace_period_seconds)}"]
+        return _run(cmd)
+
+    @mcp.tool()
+    def delete_resource(
+        kind: str,
+        name: str,
+        confirm_name: str,
+        namespace: str | None = None,
+        ignore_not_found: bool = False,
+        wait: bool = True,
+        grace_period_seconds: int | None = None,
+    ) -> str:
+        """Delete a Kubernetes resource by kind and name.
+
+        Destructive — usually NOT recoverable (unlike `delete_pod`, where a
+        controller resurrects the resource). Examples: reaping orphan
+        validation Namespaces, removing test ConfigMaps/Secrets, cleaning
+        up disposable Jobs after a run terminates.
+
+        `confirm_name` must exactly match `name` — destructive guard,
+        same shape as the Azure cleanup tools. `namespace` is omitted for
+        cluster-scoped kinds (Namespace, ClusterRole, etc.). `wait=false`
+        returns immediately without blocking on finalizer drain — useful
+        for namespaces whose finalizers can hang. `ignore_not_found=true`
+        suppresses the error when the resource is already gone (idempotent
+        cleanup).
+        """
+        if confirm_name != name:
+            raise ValueError(
+                f"confirm_name {confirm_name!r} must match name {name!r}"
+            )
+        if not kind or any(c.isspace() for c in kind):
+            raise ValueError(f"kind must be a single token, got {kind!r}")
+        cmd = ["kubectl", "delete", kind, name]
+        if namespace is not None:
+            cmd += ["-n", namespace]
+        if ignore_not_found:
+            cmd += ["--ignore-not-found"]
+        if not wait:
+            cmd += ["--wait=false"]
         if grace_period_seconds is not None:
             cmd += [f"--grace-period={int(grace_period_seconds)}"]
         return _run(cmd)
