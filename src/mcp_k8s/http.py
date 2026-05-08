@@ -47,6 +47,11 @@ def build_app() -> Starlette:
     async def healthz(_: Request) -> Response:
         return Response("ok", media_type="text/plain")
 
+    async def delete_session(_: Request) -> Response:
+        # FastMCP stateless mode returns 405 for DELETE, but Claude Code's MCP
+        # client treats 405 as fatal. Return 200 so it can reconnect cleanly.
+        return Response(status_code=200)
+
     # Starlette's Mount doesn't forward lifespan events to the inner app, so
     # FastMCP's session_manager.run() — which sets up the anyio task group
     # the streamable-http handler depends on — never fires when we mount it.
@@ -60,6 +65,7 @@ def build_app() -> Starlette:
     return Starlette(
         routes=[
             Route("/healthz", healthz),
+            Route("/", delete_session, methods=["DELETE"]),
             Mount("/", app=mcp.streamable_http_app()),
         ],
         lifespan=lifespan,
